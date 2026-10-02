@@ -17,7 +17,7 @@ import {
   uid,
   type ViewRotation,
 } from '../lib/util';
-import { measureText } from '../lib/textMeasure';
+import { layoutText } from '../lib/textMeasure';
 
 interface Props {
   fileId: string;
@@ -33,6 +33,7 @@ type Draft =
   | { kind: 'rect'; type: RectAnnotation['type']; x0: number; y0: number; x1: number; y1: number }
   | { kind: 'pen'; points: number[] }
   | { kind: 'arrow'; x0: number; y0: number; x1: number; y1: number }
+  | { kind: 'textbox'; x0: number; y0: number; x1: number; y1: number }
   | null;
 
 interface Editor {
@@ -42,6 +43,8 @@ interface Editor {
   y: number;
   text: string;
   rotation: number;
+  boxed?: boolean;
+  width?: number;
 }
 
 /** at most one inline editor open across all pages */
@@ -58,6 +61,7 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
   const svgRef = useRef<SVGSVGElement>(null);
   const [draft, setDraft] = useState<Draft>(null);
   const [drag, setDrag] = useState<{ id: string; sx: number; sy: number; dx: number; dy: number } | null>(null);
+  const [resize, setResize] = useState<{ id: string; sx: number; sy: number; startW: number; w: number } | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const editorRef = useRef<Editor | null>(null);
   editorRef.current = editor;
@@ -103,7 +107,10 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
       const style = st.styles[ed.mode];
       const base = { id: uid('ann_'), fileId, page, createdAt: now, updatedAt: now, color: style.color, opacity: style.opacity };
       if (ed.mode === 'text') {
-        st.addAnnotation({ ...base, type: 'text', x: r2(ed.x), y: r2(ed.y), text, fontSize: style.strokeWidth, strokeWidth: 0, rotation: ed.rotation });
+        st.addAnnotation({
+          ...base, type: 'text', x: r2(ed.x), y: r2(ed.y), text, fontSize: style.strokeWidth, strokeWidth: 0, rotation: ed.rotation,
+          ...(ed.boxed ? { boxed: true } : {}), ...(ed.width ? { width: r2(ed.width) } : {}),
+        });
       } else {
         st.addAnnotation({ ...base, type: 'note', x: r2(ed.x), y: r2(ed.y), text, strokeWidth: 1 });
       }
@@ -112,6 +119,30 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
 
   // close editor when file/tool changes
   useEffect(() => () => commitEditor(), [commitEditor]);
+
+  /** open the inline editor for a new text annotation after a click or a drag with the Text tool */
+  const openTextEditor = (d: { x0: number; y0: number; x1: number; y1: number }) => {
+    const st = useStore.getState();
+    const fs = st.styles.text.strokeWidth;
+    const boxed = st.textBoxed;
+    // work in display (view) coordinates so "width" is horizontal for the reader
+    const a = baseToDisplay(d.x0, d.y0, baseW, baseH, rotation);
+    const b = baseToDisplay(d.x1, d.y1, baseW, baseH, rotation);
+    const dragW = Math.abs(b.x - a.x);
+    let left: number, top: number, width: number | undefined;
+    if (dragW * zoom >= 24) {
+      left = Math.min(a.x, b.x);
+      top = Math.min(a.y, b.y);
+      width = dragW;
+    } else {
+      // click: first line vertically centred on the click
+      const pad = boxed ? Math.max(3, fs * 0.35) : 0;
+      left = a.x - pad;
+      top = a.y - fs * 0.6 - pad;
+    }
+    const anchor = displayToBase(left, top, baseW, baseH, rotation);
+    setEditor({ mode: 'text', annId: null, x: anchor.x, y: anchor.y, text: '', rotation, boxed, width });
+  };
 
   // ── pointer handling ───────────────────────────────────────────────────────
   const onPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -127,6 +158,17 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
     }
 
     if (tool === 'select') {
+      const handle = (e.target as Element).closest('[data-resize-for]') as SVGElement | null;
+      if (handle) {
+        const t = st.annotations.find((x) => x.id === handle.dataset.resizeFor);
+        if (t?.type === 'text') {
+          e.preventDefault();
+          svgRef.current!.setPointerCapture(e.pointerId);
+          const w = layoutText(t).boxW;
+          setResize({ id: t.id, sx: p.x, sy: p.y, startW: w, w });
+        }
+        return;
+      }
       if (annId) {
         st.select(annId);
         const a = st.annotations.find((x) => x.id === annId);
@@ -152,11 +194,9 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
 
     e.preventDefault();
     if (tool === 'text') {
-      // anchor so the first line is vertically centred on the click (in the current view orientation)
-      const off = st.styles.text.strokeWidth * 0.6;
-      const d = baseToDisplay(p.x, p.y, baseW, baseH, rotation);
-      const a = displayToBase(d.x, d.y - off, baseW, baseH, rotation);
-      setEditor({ mode: 'text', annId: null, x: a.x, y: a.y, text: '', rotation });
+      // click → text grows with what you type; drag → text box of that width (text wraps)
+      svgRef.current!.setPointerCapture(e.pointerId);
+      setDraft({ kind: 'textbox', x0: p.x, y0: p.y, x1: p.x, y1: p.y });
       return;
     }
     if (tool === 'note') {
@@ -182,6 +222,16 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
       if (id) useStore.getState().removeAnnotation(id);
       return;
     }
+    if (resize) {
+      const p = toBase(e.clientX, e.clientY);
+      const t = useStore.getState().annotations.find((x) => x.id === resize.id) as TextAnnotation | undefined;
+      if (!t) return;
+      // project the pointer movement onto the text's own x-axis (works in any rotation)
+      const r = (-(t.rotation ?? 0) * Math.PI) / 180;
+      const along = (p.x - resize.sx) * Math.cos(r) + (p.y - resize.sy) * Math.sin(r);
+      setResize({ ...resize, w: Math.max(t.fontSize * 2.5, resize.startW + along) });
+      return;
+    }
     if (drag) {
       const p = toBase(e.clientX, e.clientY);
       setDrag({ ...drag, dx: p.x - drag.sx, dy: p.y - drag.sy });
@@ -201,6 +251,11 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
 
   const onPointerUp = () => {
     const st = useStore.getState();
+    if (resize) {
+      if (Math.abs(resize.w - resize.startW) > 0.5) st.updateAnnotation(resize.id, { width: r2(resize.w) } as Partial<Annotation>);
+      setResize(null);
+      return;
+    }
     if (drag) {
       const a = st.annotations.find((x) => x.id === drag.id);
       if (a && Math.hypot(drag.dx, drag.dy) > 0.5) st.replaceAnnotation(translateAnnotation(a, drag.dx, drag.dy));
@@ -208,6 +263,11 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
       return;
     }
     if (!draft) return;
+    if (draft.kind === 'textbox') {
+      openTextEditor(draft);
+      setDraft(null);
+      return;
+    }
     const now = Date.now();
     const base = { id: uid('ann_'), fileId, page, createdAt: now, updatedAt: now };
     if (draft.kind === 'rect') {
@@ -237,7 +297,8 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
     const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-ann-id]') as SVGElement | null;
     const id = target?.dataset.annId;
     const a = id ? useStore.getState().annotations.find((x) => x.id === id) : undefined;
-    if (a?.type === 'text') setEditor({ mode: 'text', annId: a.id, x: a.x, y: a.y, text: a.text, rotation: a.rotation ?? 0 });
+    if (a?.type === 'text')
+      setEditor({ mode: 'text', annId: a.id, x: a.x, y: a.y, text: a.text, rotation: a.rotation ?? 0, boxed: a.boxed, width: a.width });
   };
 
   // ── rendering ──────────────────────────────────────────────────────────────
@@ -253,12 +314,20 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
       <path d={penPath(draft.points)} fill="none" stroke={draftStyle.color} strokeOpacity={draftStyle.opacity}
         strokeWidth={draftStyle.strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
     );
+  } else if (draft?.kind === 'textbox') {
+    const r = normRect(draft.x0, draft.y0, draft.x1, draft.y1);
+    draftEl = r.width * zoom >= 24 || r.height * zoom >= 24 ? (
+      <rect x={r.x} y={r.y} width={r.width} height={r.height} fill="none" stroke="#1a73e8" strokeWidth={1 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} />
+    ) : null;
   } else if (draft?.kind === 'arrow') {
     draftEl = renderArrow({ from: { x: draft.x0, y: draft.y0 }, to: { x: draft.x1, y: draft.y1 }, ...draftStyle } as ArrowAnnotation, 0);
   }
 
   const editing = editor?.annId;
-  const sel = annotations.find((a) => a.id === selectedAnnId);
+  const withResize = (a: Annotation): Annotation =>
+    resize && a.id === resize.id && a.type === 'text' ? { ...a, width: resize.w } : a;
+  const selRaw = annotations.find((a) => a.id === selectedAnnId);
+  const sel = selRaw ? withResize(selRaw) : undefined;
 
   return (
     <>
@@ -283,13 +352,14 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
                 className="ann"
                 transform={drag?.id === a.id ? `translate(${drag.dx} ${drag.dy})` : undefined}
               >
-                {renderAnnotation(a, hitW)}
+                {renderAnnotation(withResize(a), hitW)}
               </g>
             ),
           )}
           {sel && !editing && (
             <g transform={drag?.id === sel.id ? `translate(${drag.dx} ${drag.dy})` : undefined} pointerEvents="none">
               <SelectionBox a={sel} zoom={zoom} />
+              {sel.type === 'text' && tool === 'select' && <ResizeHandle a={sel} zoom={zoom} />}
             </g>
           )}
           {draftEl && <g pointerEvents="none">{draftEl}</g>}
@@ -369,16 +439,21 @@ function renderPen(a: PenAnnotation, hitW: number) {
 }
 
 function renderText(a: TextAnnotation) {
-  const lines = a.text.split('\n');
-  const m = measureText(a.text, a.fontSize);
+  const L = layoutText(a);
   const r = a.rotation ?? 0;
+  const lh = a.fontSize * TEXT_LINE_HEIGHT;
   return (
     <g transform={r ? `rotate(${-r} ${a.x} ${a.y})` : undefined}>
-      <rect x={a.x} y={a.y} width={m.width} height={m.height} className="hit-fill" />
-      <text x={a.x} y={a.y} fill={a.color} fillOpacity={a.opacity} fontSize={a.fontSize}
+      {/* transparent background: invisible fill only for grabbing it with the Select tool */}
+      <rect x={a.x} y={a.y} width={L.boxW} height={L.boxH} className="hit-fill" />
+      {a.boxed && (
+        <rect x={a.x} y={a.y} width={L.boxW} height={L.boxH} fill="none"
+          stroke={a.color} strokeOpacity={a.opacity} strokeWidth={0.9} />
+      )}
+      <text x={a.x + L.pad} y={a.y + L.pad} fill={a.color} fillOpacity={a.opacity} fontSize={a.fontSize}
         style={{ fontFamily: TEXT_FONT_FAMILY, whiteSpace: 'pre' }} dominantBaseline="text-before-edge">
-        {lines.map((l, i) => (
-          <tspan key={i} x={a.x} dy={i === 0 ? 0 : a.fontSize * TEXT_LINE_HEIGHT}>{l || ' '}</tspan>
+        {L.lines.map((l, i) => (
+          <tspan key={i} x={a.x + L.pad} dy={i === 0 ? 0 : lh}>{l || ' '}</tspan>
         ))}
       </text>
     </g>
@@ -387,12 +462,28 @@ function renderText(a: TextAnnotation) {
 
 /** corners of a text box in page units, accounting for its rotation around (x, y) */
 export function textCorners(a: TextAnnotation) {
-  const m = measureText(a.text, a.fontSize);
+  const L = layoutText(a);
   const r = (-(a.rotation ?? 0) * Math.PI) / 180;
   const c = Math.round(Math.cos(r) * 1e6) / 1e6, s = Math.round(Math.sin(r) * 1e6) / 1e6;
   return [
-    [0, 0], [m.width, 0], [m.width, m.height], [0, m.height],
+    [0, 0], [L.boxW, 0], [L.boxW, L.boxH], [0, L.boxH],
   ].map(([dx, dy]) => ({ x: a.x + dx * c - dy * s, y: a.y + dx * s + dy * c }));
+}
+
+/** drag handle on the right edge of a selected text box → change its width (text re-wraps) */
+function ResizeHandle({ a, zoom }: { a: TextAnnotation; zoom: number }) {
+  const [, tr, br] = textCorners(a);
+  const cx = (tr.x + br.x) / 2, cy = (tr.y + br.y) / 2;
+  const w = 6 / zoom, h = 16 / zoom;
+  const r = a.rotation ?? 0;
+  return (
+    <rect data-resize-for={a.id} className="resize-handle" pointerEvents="all"
+      x={cx - w / 2} y={cy - h / 2} width={w} height={h} rx={2 / zoom}
+      transform={r ? `rotate(${-r} ${cx} ${cy})` : undefined}
+      fill="#fff" stroke="#1a73e8" strokeWidth={1.2 / zoom}>
+      <title>Drag to change the text box width</title>
+    </rect>
+  );
 }
 
 function renderNote(a: NoteAnnotation) {
@@ -492,11 +583,12 @@ function InlineEditor({
   if (editor.mode === 'text') {
     const fs = (existing as TextAnnotation | undefined)?.fontSize ?? styles.text.strokeWidth;
     const color = existing?.color ?? styles.text.color;
-    const m = measureText(editor.text + 'M', fs);
+    const L = layoutText({ text: editor.text + (editor.width ? '' : 'M'), fontSize: fs, width: editor.width, boxed: editor.boxed });
+    const minW = editor.width ? editor.width * zoom : Math.max(80, L.boxW * zoom + 12);
     return (
       <textarea
         ref={ref}
-        className="text-editor"
+        className={`text-editor ${editor.boxed ? 'boxed' : ''} ${editor.width ? 'fixed-width' : ''}`}
         value={editor.text}
         placeholder="Type…"
         onChange={(e) => update(e.target.value)}
@@ -510,8 +602,10 @@ function InlineEditor({
           lineHeight: TEXT_LINE_HEIGHT,
           fontFamily: TEXT_FONT_FAMILY,
           color,
-          width: Math.max(80, m.width * zoom + 12),
-          height: m.height * zoom + 6,
+          borderColor: editor.boxed ? color : undefined,
+          padding: editor.boxed ? L.pad * zoom : undefined,
+          width: minW,
+          height: Math.max(L.boxH, fs * TEXT_LINE_HEIGHT + 2 * L.pad) * zoom + (editor.boxed ? 0 : 6),
         }}
       />
     );

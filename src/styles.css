@@ -231,6 +231,15 @@ kbd {
   position: absolute; z-index: 5; resize: none; overflow: hidden; white-space: pre;
   border: 1px dashed var(--accent); background: rgba(255,255,255,.85); padding: 1px 3px; margin: -2px 0 0 -4px; outline: none;
 }
+.text-editor.boxed { border: 1px solid; background: transparent; margin: 0; border-radius: 0; }
+.text-editor.fixed-width { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ann-layer .resize-handle { cursor: ew-resize; }
+.tb-toggle {
+  height: 26px; padding: 0 8px; margin-left: 6px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--surface); font-size: 12px; cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px;
+}
+.tb-toggle.on { background: var(--accent-soft); border-color: #b8cde2; color: var(--accent); }
+.tb-toggle .box-icon { width: 12px; height: 10px; border: 1.5px solid currentColor; border-radius: 1px; }
 .note-popup {
   position: absolute; z-index: 6; width: 240px; background: #fffde7; border: 1px solid #e0c96a; border-radius: 6px;
   box-shadow: 0 4px 14px rgba(0,0,0,.18); padding: 8px; display: grid; gap: 6px;

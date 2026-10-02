@@ -37,6 +37,8 @@ export function Toolbar({ currentPage, pageCount, goToPage }: Props) {
   const canRedo = useStore((s) => s.canRedo);
   const selected = useStore((s) => s.annotations.find((a) => a.id === s.selectedAnnId));
   const hasFile = useStore((s) => !!s.currentId);
+  const textBoxed = useStore((s) => s.textBoxed);
+  const setTextBoxed = useStore((s) => s.setTextBoxed);
   const { setZoom, setZoomMode, setTool, setToolStyle, undo, redo, rotateView, updateAnnotation, removeAnnotation } = useStore.getState();
 
   const [pageInput, setPageInput] = useState(String(currentPage));
@@ -50,6 +52,7 @@ export function Toolbar({ currentPage, pageCount, goToPage }: Props) {
   const showStyle = styleTarget !== 'select' && styleTarget !== 'eraser';
   const isText = styleTarget === 'text';
   const currentSize = selected?.type === 'text' ? selected.fontSize : style.strokeWidth;
+  const boxedOn = selected?.type === 'text' ? !!selected.boxed : textBoxed;
 
   const setColor = (color: string) => {
     if (selected) updateAnnotation(selected.id, { color });
@@ -128,6 +131,17 @@ export function Toolbar({ currentPage, pageCount, goToPage }: Props) {
           ))}
           {!(isText ? FONT_SIZES : WIDTHS).includes(currentSize) && <option value={currentSize}>{currentSize}</option>}
         </select>
+        {isText && (
+          <button className={`tb-toggle ${boxedOn ? 'on' : ''}`} aria-pressed={boxedOn}
+            title="Text box: border, transparent background. Tip: drag with the Text tool to set the box width (text wraps)."
+            onClick={() => {
+              const v = !boxedOn;
+              if (selected?.type === 'text') updateAnnotation(selected.id, { boxed: v });
+              setTextBoxed(v);
+            }}>
+            <span className="box-icon" /> 文字框
+          </button>
+        )}
       </div>
     </div>
   );

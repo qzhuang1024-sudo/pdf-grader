@@ -74,6 +74,10 @@ export interface TextAnnotation extends AnnotationBase {
    * rotated by -rotation around (x, y) so it reads upright in that view.
    */
   rotation?: number;
+  /** draw as a text box: border + light background, with padding */
+  boxed?: boolean;
+  /** fixed outer width in page units → text wraps inside. Omitted = width follows the text. */
+  width?: number;
 }
 
 export interface NoteAnnotation extends AnnotationBase {

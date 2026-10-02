@@ -65,6 +65,8 @@ interface State {
   zoomMode: ZoomMode;
   sort: SortMode;
   ungradedOnly: boolean;
+  /** new text annotations are created as boxed text boxes */
+  textBoxed: boolean;
   saveState: SaveState;
   toasts: Toast[];
   busy: string | null;
@@ -107,6 +109,7 @@ interface Actions {
   setZoomMode(m: ZoomMode): void;
   setSort(s: SortMode): void;
   setUngradedOnly(v: boolean): void;
+  setTextBoxed(v: boolean): void;
   toast(message: string, kind?: Toast['kind']): void;
   dismissToast(id: string): void;
   setBusy(msg: string | null): void;
@@ -187,6 +190,7 @@ export const useStore = create<Store>()((set, get) => {
     zoomMode: 'fit-width',
     sort: 'name',
     ungradedOnly: false,
+    textBoxed: true,
     saveState: 'saved',
     toasts: [],
     busy: null,
@@ -205,6 +209,8 @@ export const useStore = create<Store>()((set, get) => {
         assignments.sort((a, b) => a.createdAt - b.createdAt);
         const savedStyles = await storage.getSetting<Partial<Record<ToolId, AnnotationStyle>>>('toolStyles');
         const sort = (await storage.getSetting<SortMode>('sort')) ?? 'name';
+        const textBoxed = (await storage.getSetting<boolean>('textBoxed')) ?? true;
+        set({ textBoxed });
         const lastAsg = await storage.getSetting<string>('lastAssignment');
         const assignmentId = assignments.some((a) => a.id === lastAsg) ? lastAsg! : assignments[0].id;
         set({ assignments, assignmentId, styles: { ...DEFAULT_STYLES, ...savedStyles }, sort });
@@ -480,6 +486,11 @@ export const useStore = create<Store>()((set, get) => {
     setSort(sort) {
       set({ sort });
       void storage.setSetting('sort', sort);
+    },
+
+    setTextBoxed(v) {
+      set({ textBoxed: v });
+      void storage.setSetting('textBoxed', v);
     },
 
     setUngradedOnly(v) {

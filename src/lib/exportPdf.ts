@@ -16,7 +16,7 @@ import {
 import type { Annotation, GradedFile, TextAnnotation } from '../types';
 import { storage } from './storage/IndexedDbAdapter';
 import { NOTE_SIZE, TEXT_FONT_FAMILY, TEXT_LINE_HEIGHT, arrowHead, formatScore } from './util';
-import { measureText } from './textMeasure';
+import { layoutText } from './textMeasure';
 
 /*
  * Flattening strategy
@@ -132,22 +132,29 @@ function stroke(page: PDFPage, path: string, color: string, width: number, opaci
   page.drawSvgPath(path, { x: 0, y: 0, borderColor: hexToRgb(color), borderWidth: width, borderOpacity: opacity, borderLineCap: cap });
 }
 
-/** Render a text annotation into a PNG (transparent background) at 4× resolution. */
+/** Render a text annotation (plain text or bordered text box, transparent background) into a PNG at 4× resolution. */
 async function textToPng(a: TextAnnotation): Promise<{ png: Uint8Array; w: number; h: number }> {
-  const m = measureText(a.text, a.fontSize);
+  const L = layoutText(a);
   const S = 4;
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.ceil(m.width * S) + 4);
-  canvas.height = Math.max(1, Math.ceil(m.height * S) + 4);
+  canvas.width = Math.max(1, Math.ceil(L.boxW * S));
+  canvas.height = Math.max(1, Math.ceil(L.boxH * S));
   const ctx = canvas.getContext('2d')!;
   ctx.scale(S, S);
+  if (a.boxed) {
+    // border only — transparent background so the student's work stays visible
+    ctx.globalAlpha = a.opacity;
+    ctx.strokeStyle = a.color;
+    ctx.lineWidth = 0.9;
+    ctx.strokeRect(0.45, 0.45, L.boxW - 0.9, L.boxH - 0.9);
+  }
   ctx.font = `${a.fontSize}px ${TEXT_FONT_FAMILY}`;
   ctx.fillStyle = a.color;
   ctx.globalAlpha = a.opacity;
   ctx.textBaseline = 'top';
-  m.lines.forEach((l, i) => ctx.fillText(l, 0, i * a.fontSize * TEXT_LINE_HEIGHT));
+  L.lines.forEach((l, i) => ctx.fillText(l, L.pad, L.pad + i * a.fontSize * TEXT_LINE_HEIGHT));
   const blob: Blob = await new Promise((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/png'));
-  return { png: new Uint8Array(await blob.arrayBuffer()), w: canvas.width / S, h: canvas.height / S };
+  return { png: new Uint8Array(await blob.arrayBuffer()), w: L.boxW, h: L.boxH };
 }
 
 async function drawAnnotation(pdf: PDFDocument, page: PDFPage, g: PageGeom, a: Annotation) {
