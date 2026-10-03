@@ -4,6 +4,13 @@ import { storage } from './storage/IndexedDbAdapter';
 import { buildGradedPdf, gradedFilename, type ExportOptions } from './exportPdf';
 import { downloadBlob, formatScore, naturalCompare, statusLabel } from './util';
 
+/** e.g. "2026-10-04 02:20:15" in the computer's own time zone (Excel recognises this as a date-time) */
+function formatLocalTime(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 function csvCell(v: string | number | null): string {
   const s = v === null ? '' : String(v);
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -23,7 +30,7 @@ export function exportCsv(assignment: Assignment, files: GradedFile[]) {
       formatScore(f.maxScore),
       statusLabel[f.status],
       String(f.annotationCount),
-      new Date(f.lastModified).toISOString(),
+      formatLocalTime(f.lastModified),
     ]);
   }
   const csv = rows.map((r) => r.map(csvCell).join(',')).join('\r\n');

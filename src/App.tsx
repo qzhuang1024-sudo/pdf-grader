@@ -83,9 +83,20 @@ export default function App() {
     e.preventDefault();
     dragDepth.current = 0;
     setDragOver(false);
-    const pdfs = await pdfsFromDataTransfer(e.dataTransfer);
-    if (!pdfs.length) useStore.getState().toast('No PDF files found in what you dropped.', 'info');
-    else await useStore.getState().importFiles(pdfs);
+    const st = useStore.getState();
+    try {
+      const { pdfs, unreadableFolders } = await pdfsFromDataTransfer(e.dataTransfer);
+      if (unreadableFolders.length)
+        st.toast(
+          `無法直接讀取拖進來的資料夾（${unreadableFolders.join('、')}）。請改用「Open folder」，或打開資料夾、全選 PDF 後再拖進來。`,
+          'error',
+        );
+      if (pdfs.length) await st.importFiles(pdfs);
+      else if (!unreadableFolders.length) st.toast('No PDF files found in what you dropped.', 'info');
+    } catch (err) {
+      console.error(err);
+      st.toast(`Drop failed: ${err instanceof Error ? err.message : err}`, 'error');
+    }
   };
 
   if (!ready) return <div className="boot">Loading workspace…</div>;

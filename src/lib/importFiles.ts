@@ -37,15 +37,43 @@ async function walk(entry: FsEntry, out: File[]): Promise<void> {
   }
 }
 
-export async function pdfsFromDataTransfer(dt: DataTransfer): Promise<File[]> {
-  const items = Array.from(dt.items ?? []);
-  const entries = items
-    .map((it) => (it.kind === 'file' && 'webkitGetAsEntry' in it ? (it.webkitGetAsEntry() as FsEntry | null) : null))
-    .filter((e): e is FsEntry => !!e);
-  if (entries.length) {
-    const out: File[] = [];
-    for (const e of entries) await walk(e, out);
-    return out;
+export interface DropResult {
+  pdfs: File[];
+  /** folders that were dropped but could not be read (e.g. Chrome blocks this for file:// pages) */
+  unreadableFolders: string[];
+}
+
+/**
+ * Everything that touches the DataTransfer happens synchronously first — the browser empties it
+ * as soon as the drop event handler returns.
+ *  - Plain files come from dt.files (works everywhere, including a page opened from file://).
+ *  - Dropped folders are walked with the entries API; if the browser refuses (file:// pages in
+ *    Chrome can), they are reported so the UI can suggest "Open folder" instead.
+ */
+export async function pdfsFromDataTransfer(dt: DataTransfer): Promise<DropResult> {
+  const files = Array.from(dt.files ?? []);
+  const dirs: FsEntry[] = [];
+  for (const it of Array.from(dt.items ?? [])) {
+    if (it.kind !== 'file' || !('webkitGetAsEntry' in it)) continue;
+    try {
+      const e = it.webkitGetAsEntry() as FsEntry | null;
+      if (e?.isDirectory) dirs.push(e);
+    } catch {
+      /* ignore */
+    }
   }
-  return pdfsFromFileList(dt.files);
+
+  const pdfs = files.filter(isPdf);
+  const unreadableFolders: string[] = [];
+  for (const d of dirs) {
+    try {
+      const found: File[] = [];
+      await walk(d, found);
+      pdfs.push(...found);
+    } catch (err) {
+      console.warn('Could not read dropped folder', d.name, err);
+      unreadableFolders.push(d.name);
+    }
+  }
+  return { pdfs, unreadableFolders };
 }
