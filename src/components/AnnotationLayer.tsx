@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { Annotation, ArrowAnnotation, NoteAnnotation, PenAnnotation, RectAnnotation, TextAnnotation, ToolId } from '../types';
-import { useStore } from '../store/useStore';
+import { currentAssignment, useStore } from '../store/useStore';
+import { gradersOf } from '../lib/graders';
 import {
   NOTE_SIZE,
   TEXT_FONT_FAMILY,
@@ -58,6 +59,11 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
   const tool = useStore((s) => s.tool);
   const styles = useStore((s) => s.styles);
   const selectedAnnId = useStore((s) => s.selectedAnnId);
+  const assignment = useStore(currentAssignment);
+  const activeGraderId = useStore((s) => s.activeGraderId);
+  const graders = gradersOf(assignment);
+  const multi = graders.length > 1;
+  const nameOf = (id?: string) => (id ? graders.find((g) => g.id === id)?.name : undefined);
   const svgRef = useRef<SVGSVGElement>(null);
   const [draft, setDraft] = useState<Draft>(null);
   const [drag, setDrag] = useState<{ id: string; sx: number; sy: number; dx: number; dy: number } | null>(null);
@@ -219,7 +225,11 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
       if (e.buttons !== 1) return;
       const el = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-ann-id]') as SVGElement | null;
       const id = el?.dataset.annId;
-      if (id) useStore.getState().removeAnnotation(id);
+      if (!id) return;
+      const a = useStore.getState().annotations.find((x) => x.id === id);
+      // dragging the eraser never removes other graders' marks (click them to delete with a warning)
+      if (multi && a?.author && a.author !== activeGraderId) return;
+      useStore.getState().removeAnnotation(id);
       return;
     }
     if (resize) {
@@ -352,13 +362,15 @@ function AnnotationLayerImpl({ fileId, page, baseW, baseH, zoom, rotation, annot
                 className="ann"
                 transform={drag?.id === a.id ? `translate(${drag.dx} ${drag.dy})` : undefined}
               >
-                {renderAnnotation(withResize(a), hitW)}
+                {multi && a.type !== 'note' && <title>{`批改者：${nameOf(a.author) ?? '（未記錄）'}`}</title>}
+                {renderAnnotation(withResize(a), hitW, multi ? nameOf(a.author) : undefined)}
               </g>
             ),
           )}
           {sel && !editing && (
             <g transform={drag?.id === sel.id ? `translate(${drag.dx} ${drag.dy})` : undefined} pointerEvents="none">
-              <SelectionBox a={sel} zoom={zoom} />
+              <SelectionBox a={sel} zoom={zoom} label={multi ? nameOf(sel.author) ?? '未記錄批改者' : undefined}
+                mine={!sel.author || sel.author === activeGraderId} />
               {sel.type === 'text' && tool === 'select' && <ResizeHandle a={sel} zoom={zoom} />}
             </g>
           )}
@@ -486,18 +498,18 @@ function ResizeHandle({ a, zoom }: { a: TextAnnotation; zoom: number }) {
   );
 }
 
-function renderNote(a: NoteAnnotation) {
+function renderNote(a: NoteAnnotation, author?: string) {
   const s = NOTE_SIZE;
   return (
     <g>
-      <title>{a.text || '(empty comment)'}</title>
+      <title>{(author ? `${author}：` : '') + (a.text || '(empty comment)')}</title>
       <rect x={a.x} y={a.y} width={s} height={s} rx={2.5} fill={a.color} stroke="#5d4037" strokeOpacity={0.55} strokeWidth={0.8} />
       <path d={`M${a.x + 4} ${a.y + 5.5}h10M${a.x + 4} ${a.y + 9}h10M${a.x + 4} ${a.y + 12.5}h6`} stroke="#4e342e" strokeWidth={1.1} strokeLinecap="round" />
     </g>
   );
 }
 
-function renderAnnotation(a: Annotation, hitW: number) {
+function renderAnnotation(a: Annotation, hitW: number, author?: string) {
   switch (a.type) {
     case 'pen':
       return renderPen(a, hitW);
@@ -506,7 +518,7 @@ function renderAnnotation(a: Annotation, hitW: number) {
     case 'text':
       return renderText(a);
     case 'note':
-      return renderNote(a);
+      return renderNote(a, author);
     default:
       return renderRectLike(a, hitW);
   }
@@ -537,12 +549,22 @@ export function annotationBounds(a: Annotation) {
   }
 }
 
-function SelectionBox({ a, zoom }: { a: Annotation; zoom: number }) {
+function SelectionBox({ a, zoom, label, mine = true }: { a: Annotation; zoom: number; label?: string; mine?: boolean }) {
   const b = annotationBounds(a);
   const pad = 3 / zoom;
+  const color = mine ? '#1a73e8' : '#b26a00';
+  const fs = 10 / zoom;
   return (
-    <rect x={b.x - pad} y={b.y - pad} width={b.width + 2 * pad} height={b.height + 2 * pad} fill="none"
-      stroke="#1a73e8" strokeWidth={1.2 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} />
+    <>
+      <rect x={b.x - pad} y={b.y - pad} width={b.width + 2 * pad} height={b.height + 2 * pad} fill="none"
+        stroke={color} strokeWidth={1.2 / zoom} strokeDasharray={`${4 / zoom} ${3 / zoom}`} />
+      {label && (
+        <text x={b.x - pad} y={b.y - pad - 3 / zoom} fontSize={fs} fill={color} style={{ fontFamily: TEXT_FONT_FAMILY }}
+          paintOrder="stroke" stroke="#fff" strokeWidth={3 / zoom}>
+          {label}
+        </text>
+      )}
+    </>
   );
 }
 
@@ -570,6 +592,10 @@ function InlineEditor({
   }, []);
 
   const existing = editor.annId ? annotations.find((a) => a.id === editor.annId) : undefined;
+  const assignment = useStore(currentAssignment);
+  const activeGraderId = useStore((s) => s.activeGraderId);
+  const gs = gradersOf(assignment);
+  const authorName = gs.length > 1 ? gs.find((g) => g.id === (existing ? existing.author : activeGraderId))?.name : undefined;
   const pos = baseToDisplay(editor.x, editor.y, baseW, baseH, rotation);
   const update = (text: string) => setEditor({ ...editor, text });
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -621,7 +647,7 @@ function InlineEditor({
         if (!e.currentTarget.contains(e.relatedTarget as Node)) commit();
       }}
     >
-      <div className="note-popup-head">Comment</div>
+      <div className="note-popup-head">Comment{authorName ? ` · ${authorName}` : ''}</div>
       <textarea ref={ref} value={editor.text} onChange={(e) => update(e.target.value)} onKeyDown={onKeyDown} rows={4} placeholder="Write a comment for the student…" />
       <div className="note-popup-actions">
         {editor.annId && (

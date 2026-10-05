@@ -42,6 +42,8 @@ interface AnnotationBase extends AnnotationStyle {
   type: AnnotationType;
   createdAt: number;
   updatedAt: number;
+  /** Grader.id of the person who made it (missing on annotations made before graders existed) */
+  author?: string;
 }
 
 /** highlight / underline / strikethrough / rectangle / ellipse */
@@ -97,10 +99,21 @@ export type Annotation =
 
 export type GradingStatus = 'not_started' | 'in_progress' | 'graded';
 
-export interface Assignment {
+/** One person who fills in a score slot. Ids are positional (g1, g2, …) so backups from
+ *  different computers line up slot-by-slot. */
+export interface Grader {
   id: string;
   name: string;
   maxScore: number;
+}
+
+export interface Assignment {
+  id: string;
+  name: string;
+  /** total max = sum of the graders' max scores */
+  maxScore: number;
+  /** missing on data created before multi-grader support → one grader "g1" */
+  graders?: Grader[];
   createdAt: number;
   updatedAt: number;
 }
@@ -112,7 +125,10 @@ export interface GradedFile {
   filename: string;
   studentName: string;
   size: number;
+  /** TOTAL score (sum of all graders' scores); null when nobody has scored yet */
   score: number | null;
+  /** per-grader scores keyed by Grader.id; missing on old data → { g1: score } */
+  scores?: Record<string, number | null>;
   maxScore: number;
   status: GradingStatus;
   annotationCount: number;

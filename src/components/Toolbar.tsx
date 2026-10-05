@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { useStore } from '../store/useStore';
+import { currentAssignment, useStore } from '../store/useStore';
+import { gradersOf } from '../lib/graders';
 import type { ToolId } from '../types';
 import { Icon } from './Icons';
 
@@ -38,6 +39,10 @@ export function Toolbar({ currentPage, pageCount, goToPage }: Props) {
   const selected = useStore((s) => s.annotations.find((a) => a.id === s.selectedAnnId));
   const hasFile = useStore((s) => !!s.currentId);
   const textBoxed = useStore((s) => s.textBoxed);
+  const assignment = useStore(currentAssignment);
+  const activeGraderId = useStore((s) => s.activeGraderId);
+  const tbGraders = gradersOf(assignment);
+  const activeName = tbGraders.length > 1 ? tbGraders.find((g) => g.id === activeGraderId)?.name : undefined;
   const setTextBoxed = useStore((s) => s.setTextBoxed);
   const { setZoom, setZoomMode, setTool, setToolStyle, undo, redo, rotateView, updateAnnotation, removeAnnotation } = useStore.getState();
 
@@ -65,6 +70,9 @@ export function Toolbar({ currentPage, pageCount, goToPage }: Props) {
 
   return (
     <div className="toolbar" role="toolbar">
+      {activeName && (
+        <span className="tb-grader" title="新的標註會記錄成這位批改者（在左側「我是」切換）">✎ {activeName}</span>
+      )}
       <div className="tb-group">
         <button className="icon-btn" title="Zoom out (−)" onClick={() => setZoom(zoom / 1.15)} disabled={!hasFile}><Icon.zoomOut /></button>
         <button className="zoom-label" title="Reset to 100%" onClick={() => setZoom(1)} disabled={!hasFile}>{Math.round(zoom * 100)}%</button>

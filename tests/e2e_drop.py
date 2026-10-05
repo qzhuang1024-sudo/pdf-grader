@@ -37,7 +37,7 @@ with sync_playwright() as p:
     for mode, expect in [('files', 6), ('folder-ok', 4), ('folder-blocked', 1)]:
         page = br.new_context().new_page(); errs = []
         page.on('pageerror', lambda e: errs.append(str(e)))
-        page.goto(URL); page.wait_for_selector('.sidebar')
+        page.add_init_script("try{localStorage.setItem('pgw.guideSeen','1')}catch(e){}"); page.goto(URL); page.wait_for_selector('.sidebar')
         page.evaluate(JS, [payload, mode])
         page.wait_for_timeout(1500)
         n = page.locator('.file-item').count()

@@ -4,6 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { PdfViewer } from './components/PdfViewer';
 import { useShortcuts, SHORTCUTS } from './hooks/useShortcuts';
 import { pdfsFromDataTransfer } from './lib/importFiles';
+import { GuideDialog } from './components/GuideDialog';
 
 const SIDEBAR_KEY = 'pgw.sidebarWidth';
 
@@ -23,6 +24,26 @@ export default function App() {
   const toasts = useStore((s) => s.toasts);
   const [width, setWidth] = useState(readWidth);
   const [help, setHelp] = useState(false);
+  // user guide: null = closed, string = open at that section
+  const [guide, setGuide] = useState<string | null>(null);
+  useEffect(() => {
+    const open = (e: Event) => setGuide((e as CustomEvent<string | undefined>).detail ?? 'start');
+    window.addEventListener('pgw:guide', open);
+    return () => window.removeEventListener('pgw:guide', open);
+  }, []);
+  const filesCount = useStore((s) => s.files.length);
+  // first visit with an empty workspace: show the guide once
+  useEffect(() => {
+    if (!ready || filesCount) return;
+    try {
+      if (!localStorage.getItem('pgw.guideSeen')) {
+        localStorage.setItem('pgw.guideSeen', '1');
+        setGuide('start');
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [ready, filesCount]);
   const [dragOver, setDragOver] = useState(false);
   const dragDepth = useRef(0);
 
@@ -137,6 +158,9 @@ export default function App() {
           <div key={t.id} className={`toast ${t.kind}`} onClick={() => useStore.getState().dismissToast(t.id)}>{t.message}</div>
         ))}
       </div>
+      {guide !== null && (
+        <GuideDialog initial={guide} onClose={() => setGuide(null)} onShowShortcuts={() => setHelp(true)} />
+      )}
       {help && (
         <div className="modal-backdrop" onClick={() => setHelp(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Keyboard shortcuts">

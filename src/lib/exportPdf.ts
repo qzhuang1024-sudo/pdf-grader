@@ -6,14 +6,14 @@ import {
   PDFHexString,
   PDFPage,
   PDFString,
-  StandardFonts,
   degrees,
   popGraphicsState,
   pushGraphicsState,
   rgb,
   setLineJoin,
 } from 'pdf-lib';
-import type { Annotation, GradedFile, TextAnnotation } from '../types';
+import type { Annotation, GradedFile, Grader, TextAnnotation } from '../types';
+import { scoresOf } from './graders';
 import { storage } from './storage/IndexedDbAdapter';
 import { NOTE_SIZE, TEXT_FONT_FAMILY, TEXT_LINE_HEIGHT, arrowHead, formatScore } from './util';
 import { layoutText } from './textMeasure';
@@ -40,6 +40,8 @@ import { layoutText } from './textMeasure';
 
 export interface ExportOptions {
   stampScore: boolean;
+  /** grader list of the assignment: names for sticky-note authors and the per-grader stamp */
+  graders?: Grader[];
   /** apply the grader's viewer rotation to the exported page (/Rotate) */
   applyViewRotation: boolean;
 }
@@ -157,7 +159,7 @@ async function textToPng(a: TextAnnotation): Promise<{ png: Uint8Array; w: numbe
   return { png: new Uint8Array(await blob.arrayBuffer()), w: L.boxW, h: L.boxH };
 }
 
-async function drawAnnotation(pdf: PDFDocument, page: PDFPage, g: PageGeom, a: Annotation) {
+async function drawAnnotation(pdf: PDFDocument, page: PDFPage, g: PageGeom, a: Annotation, authorNames: Record<string, string>) {
   switch (a.type) {
     case 'highlight': {
       const r = a.rect;
@@ -212,7 +214,7 @@ async function drawAnnotation(pdf: PDFDocument, page: PDFPage, g: PageGeom, a: A
         Subtype: 'Text',
         Rect: rect,
         Contents: PDFHexString.fromText(a.text || ''),
-        T: PDFHexString.fromText('Grader'),
+        T: PDFHexString.fromText((a.author && authorNames[a.author]) || 'Grader'),
         Name: 'Comment',
         C: [c.red, c.green, c.blue],
         F: 4, // print
@@ -226,19 +228,44 @@ async function drawAnnotation(pdf: PDFDocument, page: PDFPage, g: PageGeom, a: A
   }
 }
 
-async function stampScore(pdf: PDFDocument, page: PDFPage, g: PageGeom, file: GradedFile) {
+/** Score stamp in the top-right corner of page 1; with several graders it lists each grader's part.
+ *  Rendered with the system font into a PNG so Chinese grader names work. */
+async function stampScore(pdf: PDFDocument, page: PDFPage, g: PageGeom, file: GradedFile, graders: Grader[]) {
   if (file.score === null) return;
-  const font = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const label = `${formatScore(file.score)} / ${formatScore(file.maxScore)}`;
-  const size = 20;
-  const tw = font.widthOfTextAtSize(label, size);
+  const main = `${formatScore(file.score)} / ${formatScore(file.maxScore)}`;
+  const sc = scoresOf(file);
+  const detail = graders.length > 1
+    ? graders.map((gr) => `${gr.name} ${sc[gr.id] === null || sc[gr.id] === undefined ? '—' : formatScore(sc[gr.id])}`).join('  ·  ')
+    : '';
+  const S = 4, padX = 10;
+  const c = document.createElement('canvas');
+  const ctx = c.getContext('2d')!;
+  ctx.font = `bold 20px ${TEXT_FONT_FAMILY}`;
+  const w1 = ctx.measureText(main).width;
+  ctx.font = `9px ${TEXT_FONT_FAMILY}`;
+  const w2 = detail ? ctx.measureText(detail).width : 0;
+  const boxW = Math.ceil(Math.max(w1, w2) + padX * 2), boxH = detail ? 46 : 34;
+  c.width = boxW * S;
+  c.height = boxH * S;
+  ctx.scale(S, S);
+  ctx.strokeStyle = '#d32f2f';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(0.75, 0.75, boxW - 1.5, boxH - 1.5);
+  ctx.fillStyle = '#d32f2f';
+  ctx.textBaseline = 'top';
+  ctx.font = `bold 20px ${TEXT_FONT_FAMILY}`;
+  ctx.fillText(main, (boxW - w1) / 2, 7);
+  if (detail) {
+    ctx.font = `9px ${TEXT_FONT_FAMILY}`;
+    ctx.fillText(detail, (boxW - w2) / 2, 31);
+  }
+  const blob: Blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('toBlob failed'))), 'image/png'));
+  const img = await pdf.embedPng(new Uint8Array(await blob.arrayBuffer()));
   // page units: top-right corner of the page as displayed
   const pw = g.rot === 90 || g.rot === 270 ? g.h : g.w;
-  const boxW = tw + 20, boxH = size + 14;
   const x = pw - boxW - 24, y = 24;
-  stroke(page, rectPath(g, x, y, boxW, boxH), '#d32f2f', 1.5, 1);
-  const q = toPdfPoint(g, x + 10, y + boxH - 10);
-  page.drawText(label, { x: q.x, y: q.y, size, font, color: rgb(0.83, 0.18, 0.18), rotate: degrees(g.rot) });
+  const q = toPdfPoint(g, x, y + boxH); // bottom-left corner of the stamp
+  page.drawImage(img, { x: q.x, y: q.y, width: boxW, height: boxH, rotate: degrees(g.rot) });
 }
 
 /** Produce the graded PDF bytes for one submission. The stored original is untouched. */
@@ -249,6 +276,7 @@ export async function buildGradedPdf(file: GradedFile, opts: ExportOptions): Pro
   const doc = await storage.getAnnotations(file.id);
   const anns = doc?.annotations ?? [];
   const pages = pdf.getPages();
+  const authorNames = Object.fromEntries((opts.graders ?? []).map((gr) => [gr.id, gr.name]));
 
   const byPage = new Map<number, Annotation[]>();
   for (const a of anns) {
@@ -264,10 +292,10 @@ export async function buildGradedPdf(file: GradedFile, opts: ExportOptions): Pro
     if (list.length || needsScore) {
       // (pdf-lib wraps the original content streams in q … Q before our first drawing operator)
       page.pushOperators(pushGraphicsState(), setLineJoin(LineJoinStyle.Round));
-      for (const a of list) await drawAnnotation(pdf, page, g, a);
+      for (const a of list) await drawAnnotation(pdf, page, g, a, authorNames);
       // stamp in the orientation the page will finally be shown in (incl. the grader's view rotation)
       const finalRot = opts.applyViewRotation ? (g.rot + (file.viewRotation ?? 0)) % 360 : g.rot;
-      if (needsScore) await stampScore(pdf, page, { ...g, rot: finalRot }, file);
+      if (needsScore) await stampScore(pdf, page, { ...g, rot: finalRot }, file, opts.graders ?? []);
       page.pushOperators(popGraphicsState());
     }
     if (opts.applyViewRotation && file.viewRotation) page.setRotation(degrees((g.rot + file.viewRotation) % 360));

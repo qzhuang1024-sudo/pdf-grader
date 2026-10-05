@@ -5,8 +5,8 @@ OUT = '/home/claude/testout'; errors = []
 with sync_playwright() as p:
     br = p.chromium.launch(headless=True); page = br.new_page(viewport={'width': 1366, 'height': 768}, accept_downloads=True)
     page.on('pageerror', lambda e: errors.append(str(e)))
-    page.goto(URL); page.wait_for_selector('.sidebar')
-    page.locator('input[type=file][multiple]').set_input_files(sorted(glob.glob('/home/claude/testpdfs/set50/*.pdf'))[:1])
+    page.add_init_script("try{localStorage.setItem('pgw.guideSeen','1')}catch(e){}"); page.goto(URL); page.wait_for_selector('.sidebar')
+    page.locator('input[type=file][accept*=pdf]').set_input_files(sorted(glob.glob('/home/claude/testpdfs/set50/*.pdf'))[:1])
     page.wait_for_selector('.page-canvas'); page.wait_for_timeout(400)
     b = page.locator('.page[data-page="1"]').bounding_box()
     page.keyboard.press('t')

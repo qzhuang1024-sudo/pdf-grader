@@ -38,7 +38,8 @@ export function formatScore(n: number | null | undefined): string {
 }
 
 export function average(files: GradedFile[]): number | null {
-  const s = files.filter((f) => f.score !== null).map((f) => f.score as number);
+  // only fully graded submissions (with several graders, a half-filled total would drag the average down)
+  const s = files.filter((f) => f.status === 'graded' && f.score !== null).map((f) => f.score as number);
   if (!s.length) return null;
   return s.reduce((a, b) => a + b, 0) / s.length;
 }

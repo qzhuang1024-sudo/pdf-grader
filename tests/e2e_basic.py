@@ -12,7 +12,7 @@ def launch(p):
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.on('console', lambda m: m.type in ('error', 'warning') and errors.append(f'[{m.type}] {m.text}'))
     page.on('pageerror', lambda e: errors.append(f'[pageerror] {e}'))
-    page.goto(URL)
+    page.add_init_script("try{localStorage.setItem('pgw.guideSeen','1')}catch(e){}"); page.goto(URL)
     page.wait_for_selector('.sidebar', timeout=20000)
     return ctx, page
 
@@ -22,7 +22,7 @@ def page_box(page, n=1):
 with sync_playwright() as p:
     ctx, page = launch(p)
     t0 = time.time()
-    page.locator('input[type=file][multiple]').set_input_files(files)
+    page.locator('input[type=file][accept*=pdf]').set_input_files(files)
     page.wait_for_selector('.page-canvas', timeout=30000)
     print('import+first render: %.2fs' % (time.time()-t0))
     page.wait_for_timeout(500)

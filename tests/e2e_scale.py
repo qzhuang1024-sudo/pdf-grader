@@ -9,7 +9,7 @@ with sync_playwright() as p:
     page = ctx.pages[0]
     page.on('console', lambda m: m.type in ('error','warning') and 'MSung' not in m.text and errors.append(f'[{m.type}] {m.text[:300]}'))
     page.on('pageerror', lambda e: errors.append(f'[pageerror] {e}'))
-    page.goto(URL); page.wait_for_selector('.sidebar')
+    page.add_init_script("try{localStorage.setItem('pgw.guideSeen','1')}catch(e){}"); page.goto(URL); page.wait_for_selector('.sidebar')
 
     # ── 50 PDFs via folder picker
     t0 = time.time()
@@ -34,7 +34,7 @@ with sync_playwright() as p:
 
     # ── large 300 page PDF + heavy 41MB scanned PDF
     t0 = time.time()
-    page.locator('input[type=file][multiple]').set_input_files(['/home/claude/testpdfs/large_300pages.pdf', '/home/claude/testpdfs/scanned_40pages.pdf', '/home/claude/testpdfs/mixed_rotated.pdf'])
+    page.locator('input[type=file][accept*=pdf]').set_input_files(['/home/claude/testpdfs/large_300pages.pdf', '/home/claude/testpdfs/scanned_40pages.pdf', '/home/claude/testpdfs/mixed_rotated.pdf'])
     page.wait_for_function("document.querySelectorAll('.file-item').length === 53", timeout=120000)
     print('import 3 big files: %.2fs' % (time.time()-t0))
     page.locator('.file-item', has_text='large_300pages').click()

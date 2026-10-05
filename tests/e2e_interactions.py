@@ -8,7 +8,7 @@ with sync_playwright() as p:
     br = p.chromium.launch(headless=True); page = br.new_page(viewport={'width': 1366, 'height': 768})
     page.on('console', lambda m: m.type in ('error','warning') and 'MSung' not in m.text and errors.append(f'[{m.type}] {m.text[:300]}'))
     page.on('pageerror', lambda e: errors.append(f'[pageerror] {e}'))
-    page.goto(URL); page.wait_for_selector('.sidebar')
+    page.add_init_script("try{localStorage.setItem('pgw.guideSeen','1')}catch(e){}"); page.goto(URL); page.wait_for_selector('.sidebar')
     # synthetic drag & drop of two PDFs
     import base64
     files = sorted(glob.glob('/home/claude/testpdfs/set50/*.pdf'))[:2]

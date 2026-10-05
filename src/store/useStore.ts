@@ -4,12 +4,14 @@ import type {
   AnnotationStyle,
   Assignment,
   GradedFile,
+  Grader,
   SortMode,
   ToolId,
   ZoomMode,
 } from '../types';
 import { storage } from '../lib/storage/IndexedDbAdapter';
-import { deriveStatus, nameFromFilename, naturalCompare, uid } from '../lib/util';
+import { nameFromFilename, naturalCompare, uid } from '../lib/util';
+import { gradersOf, recomputeFile, scoresOf } from '../lib/graders';
 import { forgetDocument } from '../lib/pdfjs';
 
 export interface Toast {
@@ -19,6 +21,13 @@ export interface Toast {
 }
 
 export type SaveState = 'saved' | 'pending' | 'saving' | 'error';
+
+export interface ScoreStyle {
+  size: 'S' | 'M' | 'L';
+  color: string;
+  background: string;
+}
+export const DEFAULT_SCORE_STYLE: ScoreStyle = { size: 'M', color: '#1f2328', background: '#ffffff' };
 
 const DEFAULT_STYLES: Record<ToolId, AnnotationStyle> = {
   select: { color: '#d32f2f', opacity: 1, strokeWidth: 2 },
@@ -67,6 +76,12 @@ interface State {
   ungradedOnly: boolean;
   /** new text annotations are created as boxed text boxes */
   textBoxed: boolean;
+  /** look of the score boxes */
+  scoreStyle: ScoreStyle;
+  /** bumps when data is reloaded from storage (backup import) so inputs re-sync */
+  reloadToken: number;
+  /** who is grading on this computer (Grader.id) — stamped on every new annotation */
+  activeGraderId: string;
   saveState: SaveState;
   toasts: Toast[];
   busy: string | null;
@@ -79,6 +94,8 @@ interface Actions {
   createAssignment(name: string): Promise<void>;
   renameAssignment(name: string): void;
   setMaxScore(max: number): void;
+  /** replace the grader list of the current assignment (count, names, max scores) */
+  setGraders(graders: Grader[]): void;
   deleteAssignment(): Promise<void>;
   // files
   importFiles(files: File[]): Promise<void>;
@@ -88,7 +105,9 @@ interface Actions {
   removeFile(id: string): Promise<void>;
   /** re-read files + current annotations from storage (after a backup restore) */
   reload(): Promise<void>;
-  setScore(score: number | null): void;
+  setGraderScore(graderId: string, score: number | null): void;
+  setActiveGrader(graderId: string): void;
+  setScoreStyle(patch: Partial<ScoreStyle>): void;
   setStudentName(name: string): void;
   setPageCount(fileId: string, n: number): void;
   rotateView(delta: 90 | -90): void;
@@ -156,16 +175,22 @@ export const useStore = create<Store>()((set, get) => {
     set({ annotations: next, canUndo: h.past.length > 0, canRedo: h.future.length > 0 });
     dirtyAnnotations.set(currentId, next);
     if (file) {
-      patchFile(currentId, {
-        annotationCount: next.length,
-        status: deriveStatus(file.score, next.length),
-      });
+      const r = recomputeFile(file, currentGraders(), next.length);
+      patchFile(currentId, { annotationCount: next.length, status: r.status });
     } else scheduleSave();
   }
 
+  function currentGraders(): Grader[] {
+    const s = get();
+    return gradersOf(s.assignments.find((a) => a.id === s.assignmentId));
+  }
+
   async function loadFiles(assignmentId: string) {
-    const files = await storage.listFiles(assignmentId);
-    set({ files });
+    const graders = gradersOf(get().assignments.find((a) => a.id === assignmentId));
+    // older records (single score) are upgraded on the fly to per-grader scores
+    const files = (await storage.listFiles(assignmentId)).map((f) => recomputeFile(f, graders));
+    const savedGrader = await storage.getSetting<string>(`activeGrader:${assignmentId}`);
+    set({ files, activeGraderId: graders.some((g) => g.id === savedGrader) ? savedGrader! : graders[0].id });
     const last = await storage.getSetting<string>(`lastFile:${assignmentId}`);
     const first = last && files.some((f) => f.id === last) ? last : sortFiles(files, get().sort)[0]?.id;
     set({ currentId: null, annotations: [] });
@@ -191,6 +216,9 @@ export const useStore = create<Store>()((set, get) => {
     sort: 'name',
     ungradedOnly: false,
     textBoxed: true,
+    scoreStyle: DEFAULT_SCORE_STYLE,
+    reloadToken: 0,
+    activeGraderId: 'g1',
     saveState: 'saved',
     toasts: [],
     busy: null,
@@ -210,7 +238,8 @@ export const useStore = create<Store>()((set, get) => {
         const savedStyles = await storage.getSetting<Partial<Record<ToolId, AnnotationStyle>>>('toolStyles');
         const sort = (await storage.getSetting<SortMode>('sort')) ?? 'name';
         const textBoxed = (await storage.getSetting<boolean>('textBoxed')) ?? true;
-        set({ textBoxed });
+        const scoreStyle = { ...DEFAULT_SCORE_STYLE, ...(await storage.getSetting<Partial<ScoreStyle>>('scoreStyle')) };
+        set({ textBoxed, scoreStyle });
         const lastAsg = await storage.getSetting<string>('lastAssignment');
         const assignmentId = assignments.some((a) => a.id === lastAsg) ? lastAsg! : assignments[0].id;
         set({ assignments, assignmentId, styles: { ...DEFAULT_STYLES, ...savedStyles }, sort });
@@ -248,14 +277,24 @@ export const useStore = create<Store>()((set, get) => {
 
     setMaxScore(max) {
       if (!(max > 0)) return;
+      const g = currentGraders();
+      if (g.length !== 1) return; // with several graders the total is the sum of their max scores
+      get().setGraders([{ ...g[0], maxScore: max }]);
+    },
+
+    setGraders(graders) {
       const { assignmentId } = get();
+      if (!assignmentId || !graders.length) return;
+      const total = graders.reduce((a, g) => a + g.maxScore, 0);
       set((s) => ({
-        assignments: s.assignments.map((a) => (a.id === assignmentId ? { ...a, maxScore: max, updatedAt: Date.now() } : a)),
-        files: s.files.map((f) => ({ ...f, maxScore: max })),
+        assignments: s.assignments.map((a) => (a.id === assignmentId ? { ...a, graders, maxScore: total, updatedAt: Date.now() } : a)),
+        files: s.files.map((f) => recomputeFile(f, graders)),
+        activeGraderId: graders.some((g) => g.id === s.activeGraderId) ? s.activeGraderId : graders[0].id,
       }));
       get().files.forEach((f) => dirtyFiles.add(f.id));
       dirtyAssignment = true;
-      scheduleSave();
+      // grader settings are rare and important → save right away instead of waiting for autosave
+      void get().flush();
     },
 
     async deleteAssignment() {
@@ -297,6 +336,7 @@ export const useStore = create<Store>()((set, get) => {
             studentName: nameFromFilename(file.name),
             size: file.size,
             score: null,
+            scores: Object.fromEntries(gradersOf(assignments.find((a) => a.id === assignmentId)).map((g) => [g.id, null])),
             maxScore: max,
             status: 'not_started',
             annotationCount: 0,
@@ -375,17 +415,32 @@ export const useStore = create<Store>()((set, get) => {
       const { assignmentId, currentId } = get();
       if (!assignmentId) return;
       await get().flush();
-      const files = await storage.listFiles(assignmentId);
+      const assignments = (await storage.listAssignments()).sort((a, b) => a.createdAt - b.createdAt);
+      const graders = gradersOf(assignments.find((a) => a.id === assignmentId));
+      const files = (await storage.listFiles(assignmentId)).map((f) => recomputeFile(f, graders));
       const doc = currentId ? await storage.getAnnotations(currentId) : null;
       histories.clear();
-      set({ files, annotations: doc?.annotations ?? [], canUndo: false, canRedo: false, selectedAnnId: null });
+      set((s) => ({
+        assignments, files, annotations: doc?.annotations ?? [], canUndo: false, canRedo: false, selectedAnnId: null,
+        reloadToken: s.reloadToken + 1,
+      }));
     },
 
-    setScore(score) {
+    setGraderScore(graderId, score) {
       const { currentId, files } = get();
       const f = files.find((x) => x.id === currentId);
-      if (!f || f.score === score) return;
-      patchFile(f.id, { score, status: deriveStatus(score, f.annotationCount) });
+      if (!f) return;
+      const scores = { ...scoresOf(f) };
+      if (scores[graderId] === score) return;
+      scores[graderId] = score;
+      const r = recomputeFile({ ...f, scores }, currentGraders());
+      patchFile(f.id, { scores: r.scores, score: r.score, status: r.status, maxScore: r.maxScore });
+    },
+
+    setScoreStyle(patch) {
+      const scoreStyle = { ...get().scoreStyle, ...patch };
+      set({ scoreStyle });
+      void storage.setSetting('scoreStyle', scoreStyle);
     },
 
     setStudentName(name) {
@@ -411,7 +466,14 @@ export const useStore = create<Store>()((set, get) => {
     },
 
     addAnnotation(a) {
-      commitAnnotations([...get().annotations, a]);
+      const author = a.author ?? get().activeGraderId;
+      commitAnnotations([...get().annotations, { ...a, author }]);
+    },
+
+    setActiveGrader(graderId) {
+      const { assignmentId } = get();
+      set({ activeGraderId: graderId });
+      if (assignmentId) void storage.setSetting(`activeGrader:${assignmentId}`, graderId);
     },
 
     updateAnnotation(id, patch, opts) {
@@ -424,8 +486,14 @@ export const useStore = create<Store>()((set, get) => {
     },
 
     removeAnnotation(id) {
-      const { annotations, selectedAnnId, editingAnnId } = get();
-      if (!annotations.some((a) => a.id === id)) return;
+      const { annotations, selectedAnnId, editingAnnId, activeGraderId } = get();
+      const target = annotations.find((a) => a.id === id);
+      if (!target) return;
+      const graders = currentGraders();
+      if (graders.length > 1 && target.author && target.author !== activeGraderId) {
+        const who = graders.find((g) => g.id === target.author)?.name ?? '其他批改者';
+        if (!confirm(`這個標註是「${who}」畫的。\n確定要刪除其他批改者的標註嗎？`)) return;
+      }
       commitAnnotations(annotations.filter((a) => a.id !== id));
       if (selectedAnnId === id) set({ selectedAnnId: null });
       if (editingAnnId === id) set({ editingAnnId: null });

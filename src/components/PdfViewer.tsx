@@ -5,6 +5,7 @@ import type { Annotation } from '../types';
 import { rotatedSize, type ViewRotation } from '../lib/util';
 import { PdfPage } from './PdfPage';
 import { Toolbar } from './Toolbar';
+import { openGuide } from './GuideDialog';
 
 interface PageSize {
   w: number;
@@ -275,6 +276,7 @@ function EmptyState() {
           <li>Type the score and press <kbd>Enter</kbd> → next student</li>
         </ol>
         <p className="muted">Everything stays on this computer (browser IndexedDB). Nothing is uploaded.</p>
+        <button className="btn" onClick={() => openGuide()}>📖 使用說明</button>
       </div>
     </div>
   );
